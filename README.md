@@ -75,6 +75,7 @@ The whole thing is roughly 3,400 lines of Rust, with about as many lines of test
 - **Edited files.** A newer StarStrings release replaces `global.ini`, so manual edits to it don't survive an update. If you maintain your own merged pack, this tool isn't for you.
 - **A deleted `global.ini`** (for example after a game repair) is put back at the next check.
 - **Offline.** Nothing happens, and nothing is logged; it tries again next hour.
+- **"Cannot be installed from here."** Start the program from File Explorer, not from inside another app. Some apps (packaged apps, like those from the Microsoft Store) keep whatever they start in a private corner of your user folder, where Windows could not find the updater again; the installer notices and stops rather than leave you with an installation that does nothing.
 - **Is it working?** Double-click the program again, or run `starstrings-updater status`. The log is at `%LOCALAPPDATA%\StarStringsUpdater\updater.log`.
 
 ## Command line

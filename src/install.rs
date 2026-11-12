@@ -192,6 +192,31 @@ fn consent_text(root: &Path, ptu: bool) -> String {
     )
 }
 
+const APP_PRIVATE_MESSAGE: &str = "StarStrings Updater cannot be installed from here.\n\n\
+It was started from inside another app that keeps the files it creates private to itself (a \
+packaged app, such as one from the Microsoft Store). Windows would not be able to find the \
+installed program, so the automatic updates would never run.\n\n\
+Start starstrings-updater.exe directly from File Explorer instead.";
+
+/// Whether this process would install into a folder only it (and the app it
+/// was started from) can see. See `win::is_app_private`.
+///
+/// Checked before anything is installed: a scheduled task pointing into such a
+/// folder can never start, so the installation would look fine and do nothing.
+fn home_is_app_private(inst: &Instance) -> bool {
+    let existed = inst.home.exists();
+    if fs::create_dir_all(&inst.home).is_err() {
+        return false;
+    }
+    let private = fs::canonicalize(&inst.home)
+        .is_ok_and(|resolved| win::is_app_private(&inst.home, &resolved));
+    if !existed {
+        // Leave no trace of the probe; the installer creates the folder again.
+        let _ = fs::remove_dir(&inst.home);
+    }
+    private
+}
+
 /// Installs or repairs the updater, then runs the first update.
 pub fn install(inst: &Instance, options: &InstallOptions, ask_first: bool) -> i32 {
     let title = inst.display_name();
@@ -203,6 +228,15 @@ pub fn install(inst: &Instance, options: &InstallOptions, ask_first: bool) -> i3
         }
         EXIT_FAILED
     };
+
+    if home_is_app_private(inst) {
+        // Not recorded in the log file: that would itself end up in the private folder.
+        logger::say(APP_PRIVATE_MESSAGE);
+        if !quiet {
+            ui::error(&title, APP_PRIVATE_MESSAGE);
+        }
+        return EXIT_FAILED;
+    }
 
     let Some(_lock) = InstanceLock::acquire(&inst.lock_name(), 60_000) else {
         return fail("Another copy of StarStrings Updater is busy. Please try again in a moment.");

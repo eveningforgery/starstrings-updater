@@ -2,6 +2,7 @@
 
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,6 +133,27 @@ pub fn current_user_sid() -> Result<String, String> {
         let _ = LocalFree(Some(HLOCAL(text.0.cast::<c_void>())));
         sid
     }
+}
+
+/// Whether `resolved` - where Windows says `intended` really lives - shows that
+/// the path was silently redirected into another app's private storage.
+///
+/// A program started from inside a packaged app (the MSIX format used by the
+/// Microsoft Store and by a growing number of desktop apps) gets a private view
+/// of AppData: a folder it creates as `...\AppData\Local\Name` really ends up in
+/// `...\AppData\Local\Packages\<app>\LocalCache\Local\Name`, where no other
+/// program - Task Scheduler included - can see it. The program itself cannot
+/// tell from the path it used; only the resolved path gives it away.
+pub fn is_app_private(intended: &Path, resolved: &Path) -> bool {
+    fn key(path: &Path) -> String {
+        let text = path.to_string_lossy().to_ascii_lowercase();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+    }
+    let (intended, resolved) = (key(intended), key(resolved));
+    intended != resolved
+        && resolved.contains(r"\packages\")
+        && resolved.contains(r"\localcache\")
+        && !intended.contains(r"\localcache\")
 }
 
 /// Root paths (`C:\`) of the fixed local drives.
@@ -309,6 +331,39 @@ mod tests {
             format_time(&add_seconds(&leap_day_eve, 1), 'T'),
             "2028-02-29T00:00:00"
         );
+    }
+
+    #[test]
+    fn recognises_redirection_into_an_apps_private_storage() {
+        let intended = Path::new(r"C:\Users\me\AppData\Local\StarStringsUpdater");
+        // What a program started from inside a packaged app actually gets.
+        assert!(is_app_private(
+            intended,
+            Path::new(
+                r"\\?\C:\Users\me\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\StarStringsUpdater"
+            )
+        ));
+        // The ordinary case, however Windows spells it.
+        assert!(!is_app_private(
+            intended,
+            Path::new(r"\\?\C:\Users\me\AppData\Local\StarStringsUpdater")
+        ));
+        assert!(!is_app_private(
+            intended,
+            Path::new(r"\\?\c:\users\ME\appdata\local\starstringsupdater")
+        ));
+        // A relocated or linked user profile resolves elsewhere, but everyone
+        // still reaches it through the same path, so it is not private.
+        assert!(!is_app_private(
+            intended,
+            Path::new(r"\\?\D:\Profiles\me\AppData\Local\StarStringsUpdater")
+        ));
+        // A data folder deliberately chosen inside such a location is not a redirect.
+        let chosen = Path::new(r"C:\Users\me\AppData\Local\Packages\X\LocalCache\Local\dev");
+        assert!(!is_app_private(
+            chosen,
+            Path::new(r"\\?\C:\Users\me\AppData\Local\Packages\X\LocalCache\Local\dev")
+        ));
     }
 
     #[test]
