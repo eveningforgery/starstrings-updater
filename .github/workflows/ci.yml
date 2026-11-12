@@ -39,8 +39,15 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
 
+      # Also proves on every change that each library in the program can still
+      # be attributed, long before a release depends on it.
+      - name: Third-party notices
+        run: ./tools/third-party-notices.ps1 -Output target/release/THIRD-PARTY-NOTICES.txt
+
       - uses: actions/upload-artifact@v7
         with:
           name: starstrings-updater
-          path: target/release/starstrings-updater.exe
+          path: |
+            target/release/starstrings-updater.exe
+            target/release/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error

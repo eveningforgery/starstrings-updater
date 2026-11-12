@@ -43,6 +43,10 @@ jobs:
         working-directory: target/release
         run: sha256sum starstrings-updater.exe > starstrings-updater.exe.sha256
 
+      # The licences of the libraries compiled into the program, for this exact build.
+      - name: Third-party notices
+        run: ./tools/third-party-notices.ps1 -Output target/release/THIRD-PARTY-NOTICES.txt
+
       - name: Create the draft release
         shell: bash
         env:
@@ -51,6 +55,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             target/release/starstrings-updater.exe \
             target/release/starstrings-updater.exe.sha256 \
+            target/release/THIRD-PARTY-NOTICES.txt \
             --draft \
             --verify-tag \
             --title "StarStrings Updater $GITHUB_REF_NAME" \
