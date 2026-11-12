@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default stable
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Includes the system tests, which register a development-named scheduled
+      # task on the runner and remove it again. The one test that needs the real
+      # StarStrings release on github.com is left to the upstream check.
+      - name: Tests
+        run: cargo test --locked -- --include-ignored --skip task_scheduler_really_runs_the_installed_copy
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: starstrings-updater
+          path: target/release/starstrings-updater.exe
+          if-no-files-found: error

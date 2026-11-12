@@ -1,0 +1,50 @@
+[package]
+name = "starstrings-updater"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Keeps MrKraken's StarStrings up to date in your Star Citizen folder, without a background process."
+license = "MIT"
+repository = "https://github.com/eveningforgery/starstrings-updater"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# Both are small, pure-Rust and dependency-free; they are all that is needed to
+# read the release archive. Everything else goes through the operating system.
+crc32fast = "1.5"
+miniz_oxide = "0.9"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+winresource = "0.1"
+
+# The binary runs for a fraction of a second once an hour, so size and start-up
+# cost matter more than throughput.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,40 @@
+name: Upstream check
+
+# The updater works silently, so it would also break silently if StarStrings
+# ever changed how it publishes releases. This asks once a day whether the
+# download addresses and archive layout the updater relies on are still there,
+# and fails (GitHub then emails the repository owner) if they are not.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: StarStrings release layout
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and inspect the release archives
+        run: |
+          set -euo pipefail
+          for asset in "latest/StarStrings-LIVE.zip" "latest-ptu/StarStrings-PTU.zip"; do
+            url="https://github.com/MrKraken/StarStrings/releases/download/$asset"
+            echo "::group::$url"
+            # Upstream deletes and recreates the release on every publish, so a
+            # brief 404 is normal; retry before calling it a failure.
+            curl --fail --silent --show-error --location \
+              --retry 6 --retry-delay 30 --retry-all-errors \
+              --dump-header headers.txt --output asset.zip "$url"
+            if ! grep -iqE '^(etag|last-modified):' headers.txt; then
+              echo "::error::$url no longer sends an ETag or Last-Modified header"
+              exit 1
+            fi
+            unzip -l asset.zip
+            if ! unzip -l asset.zip | grep -q ' Data/Localization/english/global\.ini$'; then
+              echo "::error::$url no longer contains Data/Localization/english/global.ini"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done

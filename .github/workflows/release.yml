@@ -1,0 +1,53 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the program and publishes it as a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: The tag must match the version in Cargo.toml
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Tests
+        run: cargo test --locked -- --include-ignored --skip task_scheduler_really_runs_the_installed_copy
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Checksum
+        shell: bash
+        working-directory: target/release
+        run: sha256sum starstrings-updater.exe > starstrings-updater.exe.sha256
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            target/release/starstrings-updater.exe \
+            target/release/starstrings-updater.exe.sha256 \
+            --verify-tag \
+            --title "StarStrings Updater $GITHUB_REF_NAME" \
+            --generate-notes
