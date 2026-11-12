@@ -16,6 +16,9 @@ use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
 };
+use windows::Win32::System::LibraryLoader::{
+    LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
     RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
@@ -154,6 +157,21 @@ pub fn is_app_private(intended: &Path, resolved: &Path) -> bool {
         && resolved.contains(r"\packages\")
         && resolved.contains(r"\localcache\")
         && !intended.contains(r"\localcache\")
+}
+
+/// Makes Windows look for libraries in its own system folder only.
+///
+/// By default a program also loads libraries from the folder it was started
+/// from. For something people run straight out of their Downloads folder that
+/// is an opening: a file with the right name, dropped there earlier by a web
+/// page, would be loaded into this program. The libraries this program is
+/// linked against are pinned to the system folder at build time (see
+/// `build.rs`); this covers everything loaded later, by Windows components
+/// acting on its behalf.
+pub fn restrict_library_search() {
+    unsafe {
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
 }
 
 /// Root paths (`C:\`) of the fixed local drives.

@@ -204,19 +204,30 @@ pub fn run(inst: &Instance, state: &mut State, force_language: bool) -> Result<S
     Ok(Summary { channels })
 }
 
+/// Whether the drive (or network share) a path lives on can be reached right now.
+fn volume_present(path: &Path) -> bool {
+    path.ancestors()
+        .last()
+        .is_some_and(|top| !top.as_os_str().is_empty() && top.exists())
+}
+
 /// The stored game folder, or a freshly detected one if the game has moved.
 fn resolve_root(state: &mut State) -> Result<PathBuf, String> {
     let stored = state.game_root.clone();
-    if let Some(root) = &stored
-        && detect::is_game_root(root)
-    {
-        return Ok(root.clone());
+    if let Some(root) = &stored {
+        if detect::is_game_root(root) {
+            return Ok(root.clone());
+        }
+        // A drive that is not connected at the moment says nothing about where
+        // the game is. Wait for it instead of settling on some other folder.
+        if !volume_present(root) {
+            return Ok(root.clone());
+        }
     }
     // No game where it used to be: the library may have been moved.
     if let Some(found) = detect::detect() {
-        if stored.as_ref() != Some(&found) {
+        if state.set_game_root(found.clone()) {
             logger::info(&format!("Star Citizen folder: {}", found.display()));
-            state.game_root = Some(found.clone());
         }
         return Ok(found);
     }
@@ -276,7 +287,8 @@ fn update_channel(
                 etag,
                 last_modified,
             } => {
-                let written = install_archive(inst, channel, &dir, &data, cs)?;
+                let backups = inst.backup_dir_for(root).join(channel.name);
+                let written = install_archive(channel, &dir, &backups, &data, cs)?;
                 cs.etag = etag;
                 cs.last_modified = last_modified;
                 cs.fetched_at = Some(win::unix_now());
@@ -305,10 +317,13 @@ fn update_channel(
 ///
 /// Returns how many files were written; files already identical on disk are
 /// left alone. Nothing is written unless every file in the archive checks out.
+///
+/// `backups` is where a copy is kept of any file found in the way that this
+/// updater did not put there itself.
 fn install_archive(
-    inst: &Instance,
     channel: &Channel,
     dir: &Path,
+    backups: &Path,
     zip: &[u8],
     cs: &mut ChannelState,
 ) -> Result<usize, Failure> {
@@ -333,6 +348,33 @@ fn install_archive(
         return Err(Failure::new(
             "the release archive contains no localization files; its layout may have changed",
         ));
+    }
+
+    // Everything accepted is decoded into memory and then written to the game
+    // folder, so decide how much that may be before decoding anything. The sizes
+    // are the archive's own claims, which `archive::read` then holds it to.
+    if wanted.len() > config::MAX_FILES {
+        return Err(Failure::new(format!(
+            "the release archive contains {} localization files, more than the {} this updater accepts",
+            wanted.len(),
+            config::MAX_FILES
+        )));
+    }
+    let total: u64 = wanted.iter().map(|(_, entry)| entry.size).sum();
+    if let Some((rel, _)) = wanted
+        .iter()
+        .find(|(_, entry)| entry.size > config::MAX_FILE_BYTES)
+    {
+        return Err(Failure::new(format!(
+            "{rel} in the release archive is larger than this updater accepts; not installing it"
+        )));
+    }
+    if total > config::MAX_TOTAL_BYTES {
+        return Err(Failure::new(format!(
+            "the release archive holds {} MB of localization files, more than the {} MB this updater accepts",
+            total / (1024 * 1024),
+            config::MAX_TOTAL_BYTES / (1024 * 1024)
+        )));
     }
 
     // First decode and verify everything in memory...
@@ -361,7 +403,14 @@ fn install_archive(
         let dest = dir.join(rel);
         let ours = cs.files.iter().any(|f| f.rel.eq_ignore_ascii_case(rel));
         if !ours && dest.is_file() {
-            back_up(inst, channel, rel, &dest);
+            // Someone else's file is in the way. It may be the player's own
+            // work, so it is only replaced once a copy of it is safely kept.
+            back_up(channel, rel, &dest, backups).map_err(|e| {
+                Failure::new(format!(
+                    "{} already exists and a copy of it could not be kept ({e}); it has not been replaced",
+                    dest.display()
+                ))
+            })?;
         }
         write_atomic(&dest, data).map_err(|e| {
             Failure::new(format!(
@@ -389,26 +438,32 @@ fn install_archive(
 
 /// Keeps a one-time copy of a file that was there before the updater first
 /// replaced it, in case it was something the player made themselves.
-fn back_up(inst: &Instance, channel: &Channel, rel: &str, existing: &Path) {
-    let target = inst.backup_dir().join(channel.name).join(rel);
-    if target.exists() {
-        return;
+///
+/// Succeeds only once the copy really exists; the caller must not replace the
+/// original otherwise.
+fn back_up(channel: &Channel, rel: &str, existing: &Path, backups: &Path) -> io::Result<()> {
+    let target = backups.join(rel);
+    if target.is_file() {
+        // The original from before the updater's first replacement is already kept.
+        return Ok(());
     }
-    let copied = target
-        .parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|_| fs::copy(existing, &target).map(|_| ()));
-    match copied {
-        Ok(()) => logger::info(&format!(
-            "{}: kept a copy of the previous {rel} in {}",
-            channel.name,
-            target.display()
-        )),
-        Err(e) => logger::error(&format!(
-            "{}: could not keep a copy of the previous {rel}: {e}",
-            channel.name
-        )),
+    if let Some(folder) = target.parent() {
+        fs::create_dir_all(folder)?;
     }
+    if let Err(e) = fs::copy(existing, &target) {
+        let _ = fs::remove_file(&target);
+        return Err(e);
+    }
+    if fs::metadata(&target)?.len() != fs::metadata(existing)?.len() {
+        let _ = fs::remove_file(&target);
+        return Err(io::Error::other("the copy came out incomplete"));
+    }
+    logger::info(&format!(
+        "{}: kept a copy of the previous {rel} in {}",
+        channel.name,
+        target.display()
+    ));
+    Ok(())
 }
 
 fn ensure_user_cfg(dir: &Path, cs: &mut ChannelState, force: bool) -> Result<Change, String> {
@@ -419,8 +474,15 @@ fn ensure_user_cfg(dir: &Path, cs: &mut ChannelState, force: bool) -> Result<Cha
         Err(e) => return Err(format!("could not read {USER_CFG}: {e}")),
     };
     let (updated, change) = usercfg::ensure(existing.as_deref().unwrap_or_default(), force)?;
+    if change == Change::Unchanged {
+        return Ok(change);
+    }
+    write_in_place(&path, &updated).map_err(|e| format!("could not update {USER_CFG}: {e}"))?;
+    // Recorded only now that the file really was changed: the uninstaller
+    // undoes exactly what is recorded here, and must not undo a line the
+    // player added themselves after a failed attempt.
     match &change {
-        Change::Unchanged => return Ok(change),
+        Change::Unchanged => {}
         Change::Added => {
             cs.cfg_added = true;
             cs.cfg_created = existing.is_none();
@@ -432,7 +494,6 @@ fn ensure_user_cfg(dir: &Path, cs: &mut ChannelState, force: bool) -> Result<Cha
             }
         }
     }
-    write_atomic(&path, &updated).map_err(|e| format!("could not update {USER_CFG}: {e}"))?;
     Ok(change)
 }
 
@@ -501,6 +562,36 @@ fn replace(tmp: &Path, dest: &Path) -> io::Result<()> {
     renamed
 }
 
+/// Rewrites a small file where it is, instead of swapping a new file in.
+///
+/// Used for USER.cfg. Players share that file between game channels with
+/// links, and swapping in a new file would quietly cut the link and leave the
+/// other channel with the old content. Writing through the existing file keeps
+/// every link, and its attributes, intact. The price is that the write is not
+/// atomic, which is acceptable for a few lines of text written in one call.
+pub fn write_in_place(dest: &Path, data: &[u8]) -> io::Result<()> {
+    if let Some(dir) = dest.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let read_only = fs::metadata(dest).is_ok_and(|m| m.permissions().readonly());
+    if read_only {
+        set_read_only(dest, false)?;
+    }
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest)?;
+        file.write_all(data)?;
+        file.sync_all()
+    })();
+    if read_only {
+        let _ = set_read_only(dest, true);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +639,56 @@ mod tests {
 
         set_read_only(&dest, false).unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_in_place_keeps_links_and_attributes() {
+        let dir = std::env::temp_dir().join(format!("ssu-inplace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // One USER.cfg shared by two channels through a hard link.
+        let live = dir.join("LIVE-USER.cfg");
+        let ptu = dir.join("PTU-USER.cfg");
+        fs::write(&live, b"old").unwrap();
+        fs::hard_link(&live, &ptu).unwrap();
+        write_in_place(&live, b"new content").unwrap();
+        assert_eq!(fs::read(&ptu).unwrap(), b"new content");
+
+        // Swapping a new file in is what would have cut the link.
+        write_atomic(&live, b"separate").unwrap();
+        assert_eq!(fs::read(&ptu).unwrap(), b"new content");
+
+        // Read-only files are written and stay read-only.
+        set_read_only(&ptu, true).unwrap();
+        write_in_place(&ptu, b"x").unwrap();
+        assert_eq!(fs::read(&ptu).unwrap(), b"x");
+        assert!(fs::metadata(&ptu).unwrap().permissions().readonly());
+        set_read_only(&ptu, false).unwrap();
+
+        // A file that does not exist yet is simply created.
+        let fresh = dir.join("PTU").join("USER.cfg");
+        write_in_place(&fresh, b"g_language = english").unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"g_language = english");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_drive_is_told_apart_from_a_missing_folder() {
+        let here = std::env::temp_dir();
+        assert!(volume_present(&here));
+        assert!(volume_present(&here.join("no").join("such").join("folder")));
+        // A drive letter that is not in use on this machine.
+        let unused = (b'D'..=b'Z')
+            .rev()
+            .map(|letter| format!("{}:\\", letter as char))
+            .find(|root| !Path::new(root).exists())
+            .expect("a free drive letter");
+        assert!(!volume_present(
+            &Path::new(&unused).join("Games").join("StarCitizen")
+        ));
+        assert!(!volume_present(Path::new("")));
+        assert!(!volume_present(Path::new("relative")));
     }
 }

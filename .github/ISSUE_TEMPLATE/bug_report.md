@@ -9,9 +9,9 @@ labels: bug
 
 **What the updater says about itself**
 
-Double-click `starstrings-updater.exe` again and copy what the window says, or run this in a terminal and paste the output:
+Double-click `starstrings-updater.exe` again and press Ctrl+C in the window that appears: that copies what it says. Or run this in PowerShell and paste the output:
 
-`"%LOCALAPPDATA%\StarStringsUpdater\starstrings-updater.exe" status`
+`& "$env:LOCALAPPDATA\StarStringsUpdater\starstrings-updater.exe" status | Out-Host`
 
 ```
 (paste here)

@@ -86,7 +86,9 @@ impl State {
             let (key, value) = (key.trim(), value.trim());
             match key.split_once('.') {
                 None => match key {
-                    "game_root" if !value.is_empty() => {
+                    // Only a full path means the same folder to every process
+                    // that will ever read this file.
+                    "game_root" if Path::new(value).is_absolute() => {
                         state.game_root = Some(PathBuf::from(value))
                     }
                     "channels" => {
@@ -120,7 +122,10 @@ impl State {
                                 (parts.next(), parts.next(), parts.next())
                                 && let (Ok(size), Ok(crc32)) =
                                     (size.parse::<u64>(), u32::from_str_radix(crc, 16))
-                                && !rel.is_empty()
+                                // Files are later replaced or removed at this
+                                // path, so it has to be one this program could
+                                // have installed in the first place.
+                                && crate::archive::install_path(rel).as_deref() == Some(rel)
                             {
                                 cs.files.push(InstalledFile {
                                     rel: rel.to_string(),
@@ -195,6 +200,31 @@ impl State {
         fs::rename(&tmp, path).inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
         })
+    }
+
+    /// Points the updater at a game folder. Returns whether that is a change.
+    ///
+    /// Everything recorded per channel - which files were installed, which
+    /// release they came from, what was done to USER.cfg - describes the folder
+    /// it was recorded for. None of it is true of another folder, so it is
+    /// dropped when the folder changes and the new one is examined from scratch.
+    pub fn set_game_root(&mut self, root: PathBuf) -> bool {
+        let key = |path: &Path| {
+            path.components()
+                .collect::<PathBuf>()
+                .to_string_lossy()
+                .to_lowercase()
+        };
+        if self
+            .game_root
+            .as_ref()
+            .is_some_and(|current| key(current) == key(&root))
+        {
+            return false;
+        }
+        self.per_channel.clear();
+        self.game_root = Some(root);
+        true
     }
 
     /// The per-channel record, created on first use.
@@ -282,14 +312,70 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_may_contain_separators_used_by_the_format() {
-        let mut state = State::default();
-        state.channel_mut("LIVE").files.push(InstalledFile {
-            rel: r"Data\Localization\a|b=c\global.ini".into(),
-            size: 1,
-            crc32: 2,
-        });
-        assert_eq!(State::parse(&state.serialize()), state);
+    fn only_files_this_program_could_have_installed_are_remembered() {
+        // The updater replaces and removes files at these paths, so a state
+        // file must not be able to point it anywhere else.
+        let text = "LIVE.file=1|00000002|Data\\Localization\\english\\global.ini\n\
+                    LIVE.file=1|00000002|..\\..\\Windows\\win.ini\n\
+                    LIVE.file=1|00000002|Data\\Localization\\..\\..\\..\\evil.ini\n\
+                    LIVE.file=1|00000002|C:\\Users\\me\\Documents\\notes.ini\n\
+                    LIVE.file=1|00000002|Data\\Localization\\english\\evil.dll\n\
+                    LIVE.file=1|00000002|Data\\Localization\\a|b=c\\global.ini\n\
+                    LIVE.file=1|00000002|USER.cfg\n";
+        let files = &State::parse(text).per_channel["LIVE"].files;
+        assert_eq!(
+            files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(),
+            vec![r"Data\Localization\english\global.ini"]
+        );
+    }
+
+    #[test]
+    fn a_game_folder_must_be_a_full_path() {
+        for relative in [
+            ".",
+            "StarCitizen",
+            r"Games\StarCitizen",
+            r"\StarCitizen",
+            "C:StarCitizen",
+        ] {
+            assert_eq!(
+                State::parse(&format!("game_root={relative}\n")).game_root,
+                None,
+                "{relative}"
+            );
+        }
+        assert_eq!(
+            State::parse("game_root=D:\\Games\\StarCitizen\n").game_root,
+            Some(PathBuf::from(r"D:\Games\StarCitizen"))
+        );
+        assert_eq!(
+            State::parse("game_root=\\\\nas\\games\\StarCitizen\n").game_root,
+            Some(PathBuf::from(r"\\nas\games\StarCitizen"))
+        );
+    }
+
+    #[test]
+    fn changing_the_game_folder_forgets_what_was_recorded_for_the_old_one() {
+        let mut state = sample();
+        let before = state.clone();
+
+        // The same folder, spelled differently, is not a change.
+        assert!(!state.set_game_root(PathBuf::from(
+            r"c:\program files\roberts space industries\STARCITIZEN\"
+        )));
+        assert_eq!(state, before);
+
+        assert!(state.set_game_root(PathBuf::from(r"E:\Other\StarCitizen")));
+        assert_eq!(
+            state.game_root,
+            Some(PathBuf::from(r"E:\Other\StarCitizen"))
+        );
+        assert!(state.per_channel.is_empty());
+        // Which channels to keep up to date is the player's choice, not a fact about a folder.
+        assert_eq!(state.channels, before.channels);
+
+        let mut fresh = State::default();
+        assert!(fresh.set_game_root(PathBuf::from(r"D:\Games\StarCitizen")));
     }
 
     #[test]

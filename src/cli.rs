@@ -165,6 +165,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 
 /// Program entry point; returns the process exit code.
 pub fn main() -> i32 {
+    // Before anything else can cause a library to be loaded.
+    crate::win::restrict_library_search();
     ui::attach_parent_console();
     let inst = Instance::current();
     logger::init(inst.log_path());
@@ -196,10 +198,24 @@ pub fn main() -> i32 {
             EXIT_OK
         }
         Err(message) => {
-            ui::show(&title, &format!("{message}\n\n{HELP}"));
+            let text = format!("{message}\n\n{HELP}");
+            if wants_silence(&args) {
+                // A script asked for no dialogs, or this is the scheduled
+                // check: a mistyped option must not put a window on screen.
+                logger::say(&text);
+            } else {
+                ui::show(&title, &text);
+            }
             EXIT_USAGE
         }
     }
+}
+
+/// Whether the command line asks for an unattended run, judged without relying
+/// on it having parsed.
+fn wants_silence(args: &[String]) -> bool {
+    args.first().is_some_and(|command| command == "run")
+        || args.iter().any(|arg| arg == "--quiet" || arg == "-q")
 }
 
 /// The scheduled check. Never shows a window; the exit code and the log file
@@ -223,7 +239,9 @@ fn run(inst: &Instance, options: &RunOptions) -> i32 {
 
     if let Some(path) = &options.path {
         match detect::normalize_root(path) {
-            Some(root) => state.game_root = Some(root),
+            Some(root) => {
+                state.set_game_root(root);
+            }
             None => {
                 logger::error(&format!(
                     "{} does not look like a Star Citizen folder; use the folder that contains LIVE",
@@ -391,6 +409,16 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unattended_runs_are_recognised_even_when_the_command_line_is_wrong() {
+        assert!(wants_silence(&args(&["run", "--bogus"])));
+        assert!(wants_silence(&args(&["install", "--quiet", "--bogus"])));
+        assert!(wants_silence(&args(&["uninstall", "-q", "extra"])));
+        assert!(!wants_silence(&args(&["install", "--bogus"])));
+        assert!(!wants_silence(&args(&["frobnicate"])));
+        assert!(!wants_silence(&[]));
     }
 
     #[test]

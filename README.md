@@ -29,7 +29,12 @@ If the game isn't found automatically you are asked to pick your `StarCitizen` f
 
 **Windows Settings > Apps > Installed apps > StarStrings Updater > Uninstall.**
 
-You are asked whether to keep the StarStrings files in the game (they just stop being updated) or to remove them too, which puts the game back to its original text.
+You are asked whether to keep the StarStrings files in the game (they just stop being updated) or to undo them as well. Undoing removes what the updater installed; if it had replaced a `global.ini` you already had, that file is put back instead.
+
+Two things can remain afterwards:
+
+- A copy of any file of yours that the updater replaced and did not put back. It is never deleted, and the uninstaller tells you where it is.
+- One small file in your temp folder. A program cannot delete itself while it runs, so the uninstaller moves itself there; Windows' disk clean-up removes it.
 
 ## How it works
 
@@ -52,8 +57,8 @@ Everything it touches, in full:
 | --- | --- |
 | `<StarCitizen>\LIVE\Data\Localization\english\global.ini` | Replaced with the one from the latest StarStrings release. |
 | `<StarCitizen>\LIVE\USER.cfg` | The line `g_language = english` is added if it is missing. Nothing else in the file is touched; the file is created if you don't have one. |
-| `%LOCALAPPDATA%\StarStringsUpdater\` | The program, a small state file, a log of changes, and a one-time copy of any `global.ini` that was there before it first replaced one. |
-| Task Scheduler | One task, "StarStrings Updater", running as you with normal rights. |
+| `%LOCALAPPDATA%\StarStringsUpdater\` | The program, a small state file, a log of changes, and a one-time copy of any `global.ini` that was there before it first replaced one. If that copy cannot be made, your file is not replaced. |
+| Task Scheduler | One task, named "StarStrings Updater" followed by your account's ID, running as you with normal rights. |
 | Installed apps | One entry, so you can uninstall it like anything else. |
 
 It never asks for administrator rights: the RSI Launcher already makes the game folder writable for your account.
@@ -67,10 +72,12 @@ The updater downloads a file from the internet and writes into your game folder 
 - It only ever writes `.ini` files under `Data\Localization\`. Anything else in the downloaded archive is ignored, and paths that try to leave that folder are rejected. `USER.cfg` is never taken from the archive.
 - HTTPS only, using Windows' own networking and certificate checks. It refuses to be redirected to an unencrypted address.
 - Every extracted file must match the size and checksum recorded in the archive, and nothing is written unless the whole archive checks out. A broken or half-finished download can't replace a good file.
+- A release may hold at most 32 files and 128 MB, and a download gets two minutes. A bad release can waste neither your disk nor your time.
+- It loads Windows' own libraries from the Windows system folder only, so a file planted next to the program in your Downloads folder cannot ride along.
 - No telemetry. The only thing it ever contacts is the StarStrings release download on GitHub, and it sends nothing about you or your PC.
 - It does not update itself. The program you installed is the program that runs.
 
-The whole thing is roughly 3,400 lines of Rust, with about as many lines of tests, and two small dependencies besides Microsoft's Windows bindings.
+The whole thing is roughly 3,800 lines of Rust, with as many lines of tests, and two small dependencies besides Microsoft's Windows bindings.
 
 ## Good to know
 
@@ -80,11 +87,11 @@ The whole thing is roughly 3,400 lines of Rust, with about as many lines of test
 - **A deleted `global.ini`** (for example after a game repair) is put back at the next check.
 - **Offline.** Nothing happens, and nothing is logged; it tries again next hour.
 - **"Cannot be installed from here."** Start the program from File Explorer, not from inside another app. Some apps (packaged apps, like those from the Microsoft Store) keep whatever they start in a private corner of your user folder, where Windows could not find the updater again; the installer notices and stops rather than leave you with an installation that does nothing.
-- **Is it working?** Double-click the program again, or run `starstrings-updater status`. The log is at `%LOCALAPPDATA%\StarStringsUpdater\updater.log`.
+- **Is it working?** Double-click the program again: it brings everything up to date and shows what is installed. The log of changes is at `%LOCALAPPDATA%\StarStringsUpdater\updater.log`.
 
 ## Problems?
 
-- **The updater misbehaves:** [open an issue](https://github.com/eveningforgery/starstrings-updater/issues/new/choose) and include what `starstrings-updater status` says.
+- **The updater misbehaves:** [open an issue](https://github.com/eveningforgery/starstrings-updater/issues/new/choose) and include what the window says when you double-click the program (Ctrl+C copies its text).
 - **Wrong or missing text in the game:** that is part of StarStrings itself; please report it to the [StarStrings project](https://github.com/MrKraken/StarStrings/issues).
 - **Something that could put other players at risk:** please report it privately, as described in [SECURITY.md](SECURITY.md).
 
@@ -99,6 +106,12 @@ starstrings-updater status           Show what is installed
 ```
 
 `--quiet` suppresses all dialogs, for scripted installs. Exit codes: `0` success, `1` failure, `2` wrong usage, `3` cancelled, `70` internal error.
+
+The installed copy is not on your `PATH`. To run it from PowerShell, for example to see the status:
+
+```
+& "$env:LOCALAPPDATA\StarStringsUpdater\starstrings-updater.exe" status | Out-Host
+```
 
 ## Building and testing
 

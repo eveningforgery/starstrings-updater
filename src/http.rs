@@ -5,6 +5,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
+use std::time::Instant;
 
 use windows::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_DISABLE_AUTHENTICATION,
@@ -12,9 +13,9 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_LENGTH,
     WINHTTP_QUERY_ETAG, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LAST_MODIFIED,
     WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE, WinHttpAddRequestHeaders,
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-    WinHttpSetTimeouts,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetOption, WinHttpSetTimeouts,
 };
 use windows::core::PCWSTR;
 
@@ -233,13 +234,16 @@ pub fn fetch(url: &str, conditions: &Conditions, max_bytes: usize) -> Result<Fet
         },
         "could not start a network session",
     )?;
-    // Resolve, connect, send, receive - in milliseconds.
+    // Resolve, connect, send, receive - in milliseconds. These bound each single
+    // step; the deadline bounds the whole download, so that a server feeding it
+    // a few bytes at a time cannot keep the updater running indefinitely.
     unsafe {
-        let _ = WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, 60_000);
+        let _ = WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, 30_000);
     }
+    let deadline = Instant::now() + crate::config::download_timeout();
 
     for _ in 0..=MAX_REDIRECTS {
-        match request(&session, &url, conditions, max_bytes)? {
+        match request(&session, &url, conditions, max_bytes, deadline)? {
             Step::Done(fetched) => return Ok(fetched),
             Step::Redirect(location) => {
                 let next = url.resolve(&location).map_err(HttpError::other)?;
@@ -256,9 +260,14 @@ fn request(
     url: &Url,
     conditions: &Conditions,
     max_bytes: usize,
+    deadline: Instant,
 ) -> Result<Step, HttpError> {
     let what = format!("could not reach {}", url.host);
     let fail = |e: windows::core::Error| HttpError::from_win32(&what, &e);
+    let too_slow = || HttpError::other("the download took too long and was abandoned");
+    if Instant::now() >= deadline {
+        return Err(too_slow());
+    }
     let host = wide(&url.host);
     let verb = wide("GET");
     let path = wide(&url.path);
@@ -324,11 +333,19 @@ fn request(
                 let mut data = Vec::with_capacity(expected.unwrap_or(0));
                 let mut chunk = vec![0u8; 64 * 1024];
                 loop {
+                    // Ask what has arrived and take just that. Asking for a full
+                    // buffer would block until it is full, however slowly the
+                    // server sends, and the deadline below would never be looked at.
+                    let mut available = 0u32;
+                    WinHttpQueryDataAvailable(request.0, &mut available).map_err(fail)?;
+                    if available == 0 {
+                        break;
+                    }
                     let mut read = 0u32;
                     WinHttpReadData(
                         request.0,
                         chunk.as_mut_ptr().cast::<c_void>(),
-                        chunk.len() as u32,
+                        available.min(chunk.len() as u32),
                         &mut read,
                     )
                     .map_err(fail)?;
@@ -339,6 +356,9 @@ fn request(
                         return Err(HttpError::other("the download is unexpectedly large"));
                     }
                     data.extend_from_slice(&chunk[..read as usize]);
+                    if Instant::now() >= deadline {
+                        return Err(too_slow());
+                    }
                 }
                 if expected.is_some_and(|n| n != data.len()) {
                     return Err(HttpError::other("the download was cut short"));

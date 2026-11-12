@@ -18,7 +18,26 @@ pub const USER_AGENT: &str = concat!("starstrings-updater/", env!("CARGO_PKG_VER
 /// Upper bound for a downloaded release archive (the real one is about 2.5 MB).
 pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 /// Upper bound for a single extracted file (the real one is about 11 MB).
-pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bounds for one release as a whole. Together with the per-file limit
+/// they cap what even a hostile archive can make this program hold in memory
+/// or write to the game folder.
+pub const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_FILES: usize = 32;
+
+/// How long one download may take from start to finish, in seconds. A server
+/// that keeps a connection alive a few bytes at a time must not be able to keep
+/// the updater running. `SSU_DOWNLOAD_TIMEOUT` overrides it.
+const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
+
+pub fn download_timeout() -> std::time::Duration {
+    let seconds = env::var("SSU_DOWNLOAD_TIMEOUT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| (1..=3600).contains(s))
+        .unwrap_or(DOWNLOAD_TIMEOUT_SECS);
+    std::time::Duration::from_secs(seconds)
+}
 
 /// A Star Citizen release channel and the StarStrings build published for it.
 ///
@@ -100,6 +119,15 @@ impl Instance {
         self.home.join("backup")
     }
 
+    /// Where copies of the files found in one particular game folder are kept.
+    ///
+    /// Backups are kept per game folder: a file saved from one installation
+    /// must never be mistaken for, or restored into, another.
+    pub fn backup_dir_for(&self, game_root: &std::path::Path) -> PathBuf {
+        self.backup_dir()
+            .join(format!("{:08x}", win::fnv1a(&key_of(game_root)) as u32))
+    }
+
     pub fn installed_exe(&self) -> PathBuf {
         self.home.join(EXE_NAME)
     }
@@ -111,8 +139,16 @@ impl Instance {
         }
     }
 
+    /// The name of the scheduled task.
+    ///
+    /// Task names are shared by everyone on the PC, so the standard
+    /// installation carries the account's id: a second person installing the
+    /// updater gets a task of their own instead of colliding with the first.
     pub fn task_name(&self) -> String {
-        self.display_name()
+        match (&self.tag, win::current_user_sid()) {
+            (None, Ok(sid)) => format!("{APP_NAME}-{sid}"),
+            _ => self.display_name(),
+        }
     }
 
     pub fn registry_key(&self) -> String {
@@ -157,6 +193,44 @@ fn default_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instance(home: &str, tag: Option<&str>) -> Instance {
+        Instance {
+            home: PathBuf::from(home),
+            tag: tag.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_standard_task_name_is_unique_to_the_account() {
+        let sid = win::current_user_sid().unwrap();
+        assert_eq!(
+            instance(r"C:\Users\me\AppData\Local\StarStringsUpdater", None).task_name(),
+            format!("StarStrings Updater-{sid}")
+        );
+        // A development copy is already unique through its folder.
+        assert_eq!(
+            instance(r"C:\dev\home", Some("1a2b3c4d")).task_name(),
+            "StarStrings Updater (dev 1a2b3c4d)"
+        );
+    }
+
+    #[test]
+    fn backups_are_kept_per_game_folder() {
+        let inst = instance(r"C:\data", None);
+        let here = inst.backup_dir_for(std::path::Path::new(r"D:\Games\StarCitizen"));
+        let same = inst.backup_dir_for(std::path::Path::new(r"d:\games\STARCITIZEN"));
+        let elsewhere = inst.backup_dir_for(std::path::Path::new(r"E:\Games\StarCitizen"));
+        assert_eq!(here, same);
+        assert_ne!(here, elsewhere);
+        assert!(here.starts_with(inst.backup_dir()));
+        assert_eq!(here.parent(), Some(inst.backup_dir().as_path()));
+    }
+
+    #[test]
+    fn downloads_are_given_two_minutes_by_default() {
+        assert_eq!(download_timeout(), std::time::Duration::from_secs(120));
+    }
 
     #[test]
     fn channels_resolve_case_insensitively() {

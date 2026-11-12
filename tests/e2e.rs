@@ -42,6 +42,8 @@ struct Response {
     /// Advertise this Content-Length instead of the real one.
     declared_length: Option<usize>,
     delay: Duration,
+    /// Send the body a kilobyte at a time, pausing this long in between.
+    trickle: Option<Duration>,
 }
 
 impl Response {
@@ -208,7 +210,23 @@ fn handle(
     }
     head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body);
+    match response.trickle {
+        None => {
+            let _ = stream.write_all(body);
+        }
+        Some(pause) => {
+            for piece in body.chunks(1024) {
+                if stream
+                    .write_all(piece)
+                    .and_then(|_| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                thread::sleep(pause);
+            }
+        }
+    }
     let _ = stream.flush();
 }
 
@@ -256,6 +274,17 @@ impl Sandbox {
 
     fn cfg(&self) -> PathBuf {
         self.root.join("LIVE").join("USER.cfg")
+    }
+
+    /// Where the updater keeps copies of files it found in `game_root`.
+    fn backups_for(&self, game_root: &Path) -> PathBuf {
+        let key = fnv1a(&game_root.to_string_lossy().to_lowercase()) as u32;
+        self.home.join("backup").join(format!("{key:08x}"))
+    }
+
+    /// The kept copy of a `global.ini` that was in this sandbox's LIVE folder.
+    fn backup(&self) -> PathBuf {
+        self.backups_for(&self.root).join("LIVE").join(INI_REL)
     }
 
     fn state(&self) -> String {
@@ -1112,7 +1141,7 @@ fn a_file_that_was_there_before_is_backed_up_once() {
     let mine = "my_own_merged_pack=1\n";
     fs::create_dir_all(sandbox.ini().parent().unwrap()).unwrap();
     fs::write(sandbox.ini(), mine).unwrap();
-    let backup = sandbox.home.join("backup").join("LIVE").join(INI_REL);
+    let backup = sandbox.backup();
 
     let ran = sandbox.update(&server);
     assert_eq!(ran.code, 0, "{}", ran.out);
@@ -1125,6 +1154,440 @@ fn a_file_that_was_there_before_is_backed_up_once() {
     assert_eq!(sandbox.run(&server, &["run"]).code, 0);
     assert_eq!(read(&sandbox.ini()), strings(2));
     assert_eq!(read(&backup), mine);
+}
+
+#[test]
+fn a_file_is_not_replaced_unless_a_copy_of_it_could_be_kept() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("nobackup");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    let mine = "my_own_merged_pack=1\n";
+    fs::create_dir_all(sandbox.ini().parent().unwrap()).unwrap();
+    fs::write(sandbox.ini(), mine).unwrap();
+
+    // Something is in the way of the backup folder (stands in for a full disk).
+    fs::create_dir_all(&sandbox.home).unwrap();
+    fs::write(sandbox.home.join("backup"), b"not a folder").unwrap();
+
+    let ran = sandbox.update(&server);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(
+        ran.out.contains("a copy of it could not be kept"),
+        "{}",
+        ran.out
+    );
+    assert_eq!(read(&sandbox.ini()), mine, "the player's file must survive");
+    assert!(
+        !sandbox.state().contains("LIVE.etag"),
+        "nothing was installed, so nothing may be remembered as installed"
+    );
+
+    // Once a copy can be kept, the update goes through.
+    fs::remove_file(sandbox.home.join("backup")).unwrap();
+    let ran = sandbox.run(&server, &["run"]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&sandbox.ini()), strings(1));
+    assert_eq!(read(&sandbox.backup()), mine);
+}
+
+#[test]
+fn uninstalling_never_deletes_the_only_copy_of_an_earlier_file() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("keepbackup");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    let mine = "my_own_merged_pack=1\n";
+    fs::create_dir_all(sandbox.ini().parent().unwrap()).unwrap();
+    fs::write(sandbox.ini(), mine).unwrap();
+    assert_eq!(sandbox.update(&server).code, 0);
+    assert_eq!(read(&sandbox.backup()), mine);
+
+    // "Remove the updater, keep the strings": the earlier file is not put back,
+    // so the copy of it has to stay, and the player is told where it is.
+    let ran = sandbox.run(&server, &["uninstall", "--quiet"]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&sandbox.ini()), strings(1));
+    assert_eq!(read(&sandbox.backup()), mine);
+    assert!(
+        ran.out
+            .contains(&sandbox.home.join("backup").display().to_string()),
+        "{}",
+        ran.out
+    );
+    // Everything else of the updater is gone.
+    assert_eq!(
+        sandbox
+            .files()
+            .into_iter()
+            .filter(|f| f.starts_with("home"))
+            .collect::<Vec<_>>(),
+        vec![
+            sandbox
+                .backup()
+                .strip_prefix(&sandbox.dir)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
+}
+
+#[test]
+fn uninstalling_puts_an_earlier_file_back_and_then_lets_go_of_the_copy() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("restorebackup");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    let mine = "my_own_merged_pack=1\n";
+    fs::create_dir_all(sandbox.ini().parent().unwrap()).unwrap();
+    fs::write(sandbox.ini(), mine).unwrap();
+    assert_eq!(sandbox.update(&server).code, 0);
+
+    let ran = sandbox.run(&server, &["uninstall", "--quiet", "--remove-strings"]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&sandbox.ini()), mine);
+    assert!(!sandbox.home.exists(), "left behind: {:?}", sandbox.files());
+}
+
+#[test]
+fn a_file_edited_after_installation_is_left_alone_and_its_backup_kept() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("editedbackup");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    let mine = "my_own_merged_pack=1\n";
+    fs::create_dir_all(sandbox.ini().parent().unwrap()).unwrap();
+    fs::write(sandbox.ini(), mine).unwrap();
+    assert_eq!(sandbox.update(&server).code, 0);
+
+    // The player tweaks the installed file, then uninstalls asking for a restore.
+    let edited = format!("{}my_tweak=1\n", strings(1));
+    fs::write(sandbox.ini(), &edited).unwrap();
+    let ran = sandbox.run(&server, &["uninstall", "--quiet", "--remove-strings"]);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(
+        ran.out.contains("was changed after it was installed"),
+        "{}",
+        ran.out
+    );
+    assert_eq!(
+        read(&sandbox.ini()),
+        edited,
+        "their edit must not be undone"
+    );
+    assert_eq!(
+        read(&sandbox.backup()),
+        mine,
+        "and the earlier file is still kept"
+    );
+}
+
+#[test]
+fn another_game_folder_is_examined_from_scratch() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("otherfolder");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    assert_eq!(sandbox.update(&server).code, 0);
+
+    // A second installation that already has someone's own pack and settings.
+    let other_root = sandbox.dir.join("Other Library").join("StarCitizen");
+    let other_live = other_root.join("LIVE");
+    let other_ini = other_live.join(INI_REL);
+    fs::create_dir_all(other_ini.parent().unwrap()).unwrap();
+    fs::write(other_live.join("Data.p4k"), b"not really the game").unwrap();
+    let theirs = "someone_elses_pack=1\n";
+    fs::write(&other_ini, theirs).unwrap();
+    fs::write(other_live.join("USER.cfg"), "g_language = german\n").unwrap();
+
+    // Pointing the updater at it must not carry over anything it knew about
+    // the first folder: "not modified" would be the wrong answer here.
+    let ran = sandbox.run(&server, &["run", "--path", other_root.to_str().unwrap()]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(
+        server.requests().last().unwrap().header("if-none-match"),
+        None,
+        "the new folder must be checked unconditionally"
+    );
+    assert_eq!(read(&other_ini), strings(1));
+    let other_backup = sandbox.backups_for(&other_root).join("LIVE").join(INI_REL);
+    assert_eq!(read(&other_backup), theirs, "their file must be kept");
+    assert!(
+        sandbox
+            .state()
+            .contains(&format!("game_root={}", other_root.display()))
+    );
+
+    // Undoing it restores what belonged to *that* folder, and leaves the first alone.
+    let ran = sandbox.run(&server, &["uninstall", "--quiet", "--remove-strings"]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&other_ini), theirs);
+    assert_eq!(
+        read(&other_live.join("USER.cfg")),
+        "g_language = german\n",
+        "a scheduled check never changes another language choice"
+    );
+    assert_eq!(read(&sandbox.ini()), strings(1));
+}
+
+#[test]
+fn a_disconnected_drive_does_not_make_it_settle_on_another_folder() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("unplugged");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+
+    // The game is recorded as living on a drive that is not there right now.
+    let unused = (b'D'..=b'Z')
+        .rev()
+        .map(|letter| format!("{}:\\", letter as char))
+        .find(|root| !Path::new(root).exists())
+        .expect("a free drive letter");
+    let recorded = format!("{unused}Games\\StarCitizen");
+    fs::create_dir_all(&sandbox.home).unwrap();
+    let state = format!(
+        "# StarStrings Updater state. Managed automatically.\ngame_root={recorded}\nchannels=LIVE\n"
+    );
+    fs::write(sandbox.home.join("state.ini"), &state).unwrap();
+
+    // Another installation could be found - but the recorded one is only away.
+    let mut command = sandbox.command(&server, &["run"]);
+    command.env("SSU_SEARCH_PATHS", &sandbox.library);
+    let ran = finish(command);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert!(ran.out.contains("skipped"), "{}", ran.out);
+    assert_eq!(sandbox.state(), state);
+    assert!(server.requests().is_empty());
+    assert!(!sandbox.ini().exists());
+}
+
+#[test]
+fn archives_that_are_too_big_are_refused_before_anything_is_unpacked() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("limits");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    assert_eq!(sandbox.update(&server).code, 0);
+    let state = sandbox.state();
+    let files = sandbox.files();
+
+    // Too many files.
+    let mut many = ZipBuilder::new();
+    for index in 0..33 {
+        many = many.stored(
+            &format!("Data/Localization/english/part{index}.ini"),
+            b"a=1",
+        );
+    }
+    // Small files that claim to unpack to far more than is allowed in total...
+    let padding = vec![b'a'; 4096];
+    let bloated = ZipBuilder::new()
+        .deflated_claiming("Data/Localization/english/a.ini", &padding, 60 << 20)
+        .deflated_claiming("Data/Localization/english/b.ini", &padding, 60 << 20)
+        .deflated_claiming("Data/Localization/english/c.ini", &padding, 60 << 20)
+        .build();
+    // ...and one that claims more than a single file may be.
+    let huge = ZipBuilder::new()
+        .deflated_claiming(INI_IN_ZIP, &padding, 65 << 20)
+        .build();
+
+    for (what, archive, expected) in [
+        ("too many files", many.build(), "more than the 32"),
+        ("too much in total", bloated, "more than the 128 MB"),
+        (
+            "one file too large",
+            huge,
+            "larger than this updater accepts",
+        ),
+    ] {
+        server.publish(archive, "big", DATE_2);
+        let ran = sandbox.run(&server, &["run"]);
+        assert_eq!(ran.code, 1, "{what}: {}", ran.out);
+        assert!(ran.out.contains(expected), "{what}: {}", ran.out);
+        assert_eq!(sandbox.state(), state, "{what}");
+        assert_eq!(
+            sandbox
+                .files()
+                .into_iter()
+                .filter(|f| !f.ends_with("updater.log"))
+                .collect::<Vec<_>>(),
+            files
+                .iter()
+                .filter(|f| !f.ends_with("updater.log"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "{what}: nothing may be written"
+        );
+    }
+}
+
+#[test]
+fn a_download_that_crawls_is_abandoned() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("crawl");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    assert_eq!(sandbox.update(&server).code, 0);
+
+    // A new release served a kilobyte every quarter second: far too slow to
+    // finish within the two seconds this test allows a download.
+    server.serve(
+        "/live.zip",
+        Response {
+            trickle: Some(Duration::from_millis(250)),
+            ..Response::zip(
+                ZipBuilder::new()
+                    .stored(INI_IN_ZIP, strings(2).repeat(3).as_bytes())
+                    .build(),
+                "v2",
+                DATE_2,
+            )
+        },
+    );
+    let started = std::time::Instant::now();
+    let mut command = sandbox.command(&server, &["run"]);
+    command.env("SSU_DOWNLOAD_TIMEOUT", "2");
+    let ran = finish(command);
+    let took = started.elapsed();
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.out.contains("took too long"), "{}", ran.out);
+    // Well under the time the whole body would take, and close to the limit:
+    // the limit has to bite between small pieces, not once a large buffer fills.
+    assert!(took < Duration::from_secs(8), "gave up only after {took:?}");
+    assert_eq!(read(&sandbox.ini()), strings(1));
+    assert!(sandbox.state().contains("LIVE.etag=\"v1\""));
+}
+
+#[test]
+fn a_relative_path_is_stored_as_the_full_path() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("relative");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+
+    // `--path .` typed inside the game folder.
+    let mut command = sandbox.command(&server, &["run", "--path", "."]);
+    command.current_dir(&sandbox.root);
+    let ran = finish(command);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert!(
+        sandbox
+            .state()
+            .contains(&format!("game_root={}\n", sandbox.root.display())),
+        "{}",
+        sandbox.state()
+    );
+
+    // The scheduled task runs from another folder entirely and must still find it.
+    server.publish(release(&strings(2)), "v2", DATE_2);
+    let mut command = sandbox.command(&server, &["run"]);
+    command.current_dir(std::env::temp_dir());
+    let ran = finish(command);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&sandbox.ini()), strings(2));
+}
+
+#[test]
+fn a_user_cfg_shared_between_channels_stays_shared() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("sharedcfg");
+    sandbox.add_channel("PTU");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+
+    // One settings file for both channels, as players set up with a link.
+    let ptu_cfg = sandbox.root.join("PTU").join("USER.cfg");
+    fs::write(sandbox.cfg(), "r_DisplayInfo = 1\r\n").unwrap();
+    fs::hard_link(sandbox.cfg(), &ptu_cfg).unwrap();
+
+    let ran = sandbox.update(&server);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    let expected = "r_DisplayInfo = 1\r\ng_language = english\r\n";
+    assert_eq!(read(&sandbox.cfg()), expected);
+    assert_eq!(read(&ptu_cfg), expected, "the link must not have been cut");
+
+    // And it is still one file afterwards.
+    fs::write(&ptu_cfg, "changed through the other name").unwrap();
+    assert_eq!(read(&sandbox.cfg()), "changed through the other name");
+}
+
+#[test]
+fn a_change_to_user_cfg_is_only_remembered_if_it_was_really_made() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("cfgfailed");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    fs::write(sandbox.cfg(), "r_DisplayInfo = 1\r\n").unwrap();
+
+    // Another program has the file open and allows reading but not writing.
+    const FILE_SHARE_READ: u32 = 1;
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(sandbox.cfg())
+        .unwrap();
+    let ran = sandbox.update(&server);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.out.contains("could not update USER.cfg"), "{}", ran.out);
+    drop(held);
+    assert_eq!(read(&sandbox.cfg()), "r_DisplayInfo = 1\r\n");
+    assert!(
+        !sandbox.state().contains("cfg_added"),
+        "nothing was added, so nothing may be recorded as added:\n{}",
+        sandbox.state()
+    );
+
+    // The player adds the line themselves; uninstalling must leave their line alone.
+    fs::write(
+        sandbox.cfg(),
+        "r_DisplayInfo = 1\r\ng_language = english\r\n",
+    )
+    .unwrap();
+    assert_eq!(sandbox.run(&server, &["run"]).code, 0);
+    let ran = sandbox.run(&server, &["uninstall", "--quiet", "--remove-strings"]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(
+        read(&sandbox.cfg()),
+        "r_DisplayInfo = 1\r\ng_language = english\r\n"
+    );
+}
+
+#[test]
+fn a_library_planted_beside_the_program_is_not_loaded() {
+    // Windows normally prefers libraries lying next to a program. Someone who
+    // can drop a file into the Downloads folder must not get their code loaded
+    // when the updater is started from there.
+    unsafe extern "system" {
+        fn SetErrorMode(mode: u32) -> u32;
+    }
+    // If this ever regresses, fail instead of putting an error dialog on screen.
+    const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+    unsafe { SetErrorMode(SEM_FAILCRITICALERRORS) };
+
+    let server = Server::start();
+    let sandbox = Sandbox::new("planted");
+    server.publish(release(&strings(1)), "v1", DATE_1);
+    let downloads = sandbox.dir.join("Downloads");
+    fs::create_dir_all(&downloads).unwrap();
+    let program = downloads.join("starstrings-updater.exe");
+    fs::copy(EXE, &program).unwrap();
+    // Not libraries at all: loading any of them would stop the program from starting.
+    for name in [
+        "winhttp.dll",
+        "version.dll",
+        "cryptbase.dll",
+        "taskschd.dll",
+    ] {
+        fs::write(downloads.join(name), b"this is not a library").unwrap();
+    }
+
+    let mut version = Command::new(&program);
+    version.arg("--version").stdin(Stdio::null());
+    let ran = finish(version);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(ran.out.trim(), format!("StarStrings Updater {VERSION}"));
+
+    // A real check exercises the networking library as well.
+    let mut check = Command::new(&program);
+    check
+        .args(["run", "--path", sandbox.root.to_str().unwrap()])
+        .env("SSU_HOME", &sandbox.home)
+        .env("SSU_URL_LIVE", server.url("/live.zip"))
+        .env("SSU_SEARCH_PATHS", sandbox.dir.join("nowhere"))
+        .stdin(Stdio::null());
+    let ran = finish(check);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(read(&sandbox.ini()), strings(1));
 }
 
 #[test]

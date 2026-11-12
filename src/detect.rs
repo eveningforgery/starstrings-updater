@@ -42,7 +42,12 @@ pub fn is_game_root(path: &Path) -> bool {
 ///
 /// Accepts the root itself (`...\StarCitizen`), a channel folder inside it
 /// (`...\StarCitizen\LIVE`) or the library folder above it.
+///
+/// The result is always a full path. It is stored and used later by the
+/// scheduled task, which runs from a different folder, so `.` or `..\Games`
+/// would silently mean somewhere else by then.
 pub fn normalize_root(path: &Path) -> Option<PathBuf> {
+    let path = &std::path::absolute(path).ok()?;
     if is_game_root(path) {
         return Some(path.to_path_buf());
     }
