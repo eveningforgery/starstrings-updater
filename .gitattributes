@@ -1,0 +1,3 @@
+# Keep line endings identical on every machine and in CI.
+* text=auto eol=lf
+*.ico binary
