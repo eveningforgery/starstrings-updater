@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Wrong or missing text in the game
+    url: https://github.com/MrKraken/StarStrings/issues
+    about: The text itself is part of StarStrings, not of this updater. Please report it to the StarStrings project.

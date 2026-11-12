@@ -1,5 +1,7 @@
 # StarStrings Updater
 
+[![CI](https://github.com/eveningforgery/starstrings-updater/actions/workflows/ci.yml/badge.svg)](https://github.com/eveningforgery/starstrings-updater/actions/workflows/ci.yml)
+
 Keeps [MrKraken's StarStrings](https://github.com/MrKraken/StarStrings) up to date in your Star Citizen folder, by itself, without anything running in the background.
 
 StarStrings has to be re-installed after every Star Citizen patch or the game shows missing text. This does that for you: whenever a new StarStrings release is published, it lands in your `LIVE` folder within the hour.
@@ -8,7 +10,7 @@ StarStrings has to be re-installed after every Star Citizen patch or the game sh
 - **Nothing stays running.** Windows starts it for a moment when you sign in and once an hour; it checks, and exits.
 - **Small.** One 430 KB program, no dependencies, no administrator rights.
 
-Windows 10 and 11 only.
+For Windows 10 and 11. It has been tested on Windows 11; if something misbehaves on Windows 10, please [open an issue](https://github.com/eveningforgery/starstrings-updater/issues/new/choose).
 
 ## Install
 
@@ -17,7 +19,9 @@ Windows 10 and 11 only.
 
 That's it. It finds your Star Citizen folder, installs the current StarStrings into `LIVE`, and keeps it current from then on. You can delete the downloaded file afterwards.
 
-Windows may show "Windows protected your PC" the first time, because the program is new and not code-signed. Choose **More info**, then **Run anyway**. Each release comes with a SHA-256 checksum if you want to verify the download.
+Windows may show "Windows protected your PC" the first time, because the program is new and not code-signed. Choose **More info**, then **Run anyway**.
+
+Each release lists the SHA-256 checksum of the program. To check your download, run `Get-FileHash .\starstrings-updater.exe` in PowerShell and compare the result.
 
 If the game isn't found automatically you are asked to pick your `StarCitizen` folder (the one that contains `LIVE`).
 
@@ -78,6 +82,12 @@ The whole thing is roughly 3,400 lines of Rust, with about as many lines of test
 - **"Cannot be installed from here."** Start the program from File Explorer, not from inside another app. Some apps (packaged apps, like those from the Microsoft Store) keep whatever they start in a private corner of your user folder, where Windows could not find the updater again; the installer notices and stops rather than leave you with an installation that does nothing.
 - **Is it working?** Double-click the program again, or run `starstrings-updater status`. The log is at `%LOCALAPPDATA%\StarStringsUpdater\updater.log`.
 
+## Problems?
+
+- **The updater misbehaves:** [open an issue](https://github.com/eveningforgery/starstrings-updater/issues/new/choose) and include what `starstrings-updater status` says.
+- **Wrong or missing text in the game:** that is part of StarStrings itself; please report it to the [StarStrings project](https://github.com/MrKraken/StarStrings/issues).
+- **Something that could put other players at risk:** please report it privately, as described in [SECURITY.md](SECURITY.md).
+
 ## Command line
 
 ```
@@ -104,10 +114,12 @@ cargo test -- --include-ignored
 
 `--include-ignored` adds the system tests. Those register a real scheduled task and "Installed apps" entry under a development name, check them, and remove them again; one of them has Task Scheduler run a sandboxed copy against the real StarStrings release.
 
+Pushing a tag such as `v0.2.0` builds the program on GitHub and prepares a draft release with the program, its checksum and the licence notices; nothing is published until someone presses "Publish release".
+
 ## Credits and disclaimer
 
 StarStrings is made by [MrKraken](https://github.com/MrKraken/StarStrings). This project only automates the installation steps from its README and does not include or redistribute the pack; please read that README for what the pack changes and for Cloud Imperium's position on community localization files.
 
 This is an unofficial fan project. It is not affiliated with MrKraken or with the Cloud Imperium group of companies. Star Citizen is a trademark of Cloud Imperium Rights LLC.
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE). The program is built with a few open-source libraries; their licences are in `THIRD-PARTY-NOTICES.txt`, attached to every release.

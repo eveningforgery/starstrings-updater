@@ -340,7 +340,7 @@ mod tests {
         assert!(is_app_private(
             intended,
             Path::new(
-                r"\\?\C:\Users\me\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\StarStringsUpdater"
+                r"\\?\C:\Users\me\AppData\Local\Packages\SomeApp_8wekyb3d8bbwe\LocalCache\Local\StarStringsUpdater"
             )
         ));
         // The ordinary case, however Windows spells it.
