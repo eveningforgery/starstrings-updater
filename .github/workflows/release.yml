@@ -1,6 +1,9 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the program and publishes it as a release.
+# Pushing a tag like v0.1.0 builds the program and prepares a release for it.
+#
+# The release is created as a draft: nothing reaches players until someone
+# opens it on GitHub, looks it over and presses "Publish release".
 on:
   push:
     tags: ["v*"]
@@ -40,7 +43,7 @@ jobs:
         working-directory: target/release
         run: sha256sum starstrings-updater.exe > starstrings-updater.exe.sha256
 
-      - name: Publish
+      - name: Create the draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,6 +51,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             target/release/starstrings-updater.exe \
             target/release/starstrings-updater.exe.sha256 \
+            --draft \
             --verify-tag \
             --title "StarStrings Updater $GITHUB_REF_NAME" \
             --generate-notes
