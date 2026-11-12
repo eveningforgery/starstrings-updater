@@ -8,15 +8,20 @@ on:
   push:
     tags: ["v*"]
 
+# No job may write to the repository unless it says so itself.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Build and publish
+  # Building runs code from the dependencies (their build scripts) and the
+  # tests, so this job gets no way of changing the repository at all.
+  build:
+    name: Build
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         run: |
@@ -47,15 +52,38 @@ jobs:
       - name: Third-party notices
         run: ./tools/third-party-notices.ps1 -Output target/release/THIRD-PARTY-NOTICES.txt
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: |
+            target/release/starstrings-updater.exe
+            target/release/starstrings-updater.exe.sha256
+            target/release/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+
+  # Only this job may create the release, and it runs nothing from the project:
+  # it takes the three finished files and attaches them.
+  publish:
+    name: Create the draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-files
+          path: release-files
+
       - name: Create the draft release
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            target/release/starstrings-updater.exe \
-            target/release/starstrings-updater.exe.sha256 \
-            target/release/THIRD-PARTY-NOTICES.txt \
+            release-files/starstrings-updater.exe \
+            release-files/starstrings-updater.exe.sha256 \
+            release-files/THIRD-PARTY-NOTICES.txt \
+            --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --title "StarStrings Updater $GITHUB_REF_NAME" \
