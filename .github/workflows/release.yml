@@ -1,12 +1,17 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the program and prepares a release for it.
+# Pushing a tag like v0.2.0 builds the program and prepares a release for it.
 #
 # The release is created as a draft: nothing reaches players until someone
 # opens it on GitHub, looks it over and presses "Publish release".
+#
+# Starting this workflow by hand ("Run workflow") is a rehearsal: it builds,
+# tests and checks the release files exactly as a tag would, and stops short of
+# creating anything.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 # No job may write to the repository unless it says so itself.
 permissions:
@@ -29,6 +34,7 @@ jobs:
           rustup default stable
 
       - name: The tag must match the version in Cargo.toml
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -37,11 +43,24 @@ jobs:
             exit 1
           fi
 
+      # In release mode, so that what the tests exercise is the very program
+      # that gets published, not a debug build of the same source.
       - name: Tests
-        run: cargo test --locked -- --include-ignored --skip task_scheduler_really_runs_the_installed_copy
+        run: cargo test --release --locked -- --include-ignored --skip task_scheduler_really_runs_the_installed_copy
 
       - name: Build
         run: cargo build --release --locked
+
+      - name: The program starts and reports the right version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          reported=$(target/release/starstrings-updater.exe --version | tr -d '\r')
+          echo "$reported"
+          if [ "$reported" != "StarStrings Updater $version" ]; then
+            echo "::error::expected 'StarStrings Updater $version'"
+            exit 1
+          fi
 
       - name: Checksum
         shell: bash
@@ -62,7 +81,7 @@ jobs:
           if-no-files-found: error
 
   # Only this job may create the release, and it runs nothing from the project:
-  # it takes the three finished files and attaches them.
+  # it takes the three finished files, checks them and attaches them.
   publish:
     name: Create the draft release
     needs: build
@@ -75,7 +94,15 @@ jobs:
           name: release-files
           path: release-files
 
+      - name: The files arrived intact
+        working-directory: release-files
+        run: |
+          ls -l
+          sha256sum --check starstrings-updater.exe.sha256
+          test -s THIRD-PARTY-NOTICES.txt
+
       - name: Create the draft release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -88,3 +115,7 @@ jobs:
             --verify-tag \
             --title "StarStrings Updater $GITHUB_REF_NAME" \
             --generate-notes
+
+      - name: Rehearsal only
+        if: github.ref_type != 'tag'
+        run: echo "::notice::Rehearsal - the release files were built and checked, and nothing was published."
