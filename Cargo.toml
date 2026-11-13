@@ -1,6 +1,6 @@
 [package]
 name = "starstrings-updater"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Keeps MrKraken's StarStrings up to date in your Star Citizen folder, without a background process."
