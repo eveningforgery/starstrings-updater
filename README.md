@@ -8,7 +8,7 @@ StarStrings has to be re-installed after every Star Citizen patch or the game sh
 
 - **Invisible.** No window, no tray icon, no notifications.
 - **Nothing stays running.** Windows starts it for a moment when you sign in and once an hour; it checks, and exits.
-- **Small.** One 430 KB program, no dependencies, no administrator rights.
+- **Small.** One program of about 440 KB, no dependencies, no administrator rights.
 
 For Windows 10 and 11. It has been tested on Windows 11; if something misbehaves on Windows 10, please [open an issue](https://github.com/eveningforgery/starstrings-updater/issues/new/choose).
 
